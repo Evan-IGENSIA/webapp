@@ -1,0 +1,58 @@
+image: docker:stable
+
+services:
+  - docker:dind
+
+stages:
+  - test
+  - security-sast
+  - build
+  - security-container
+
+unit-test:
+  image: node:16
+  stage: test
+  script:
+    - npm install
+    - npm test
+  artifacts:
+    paths:
+      - coverage/
+
+sonar-check:
+  image:
+    name: sonarsource/sonar-scanner-cli:latest
+    entrypoint: [""]
+  stage: security-sast
+  dependencies:
+    - unit-test
+  script:
+    - sonar-scanner -Dsonar.qualitygate.wait=true
+  allow_failure: false
+
+dependency-scan:
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  stage: security-sast
+  script:
+    - trivy fs . --severity HIGH,CRITICAL --exit-code 1 --no-progress
+
+build-image:
+  stage: build
+  script:
+    - docker build -t my-app:$CI_COMMIT_SHA .
+    - docker save my-app:$CI_COMMIT_SHA -o my-image.tar
+  artifacts:
+    paths:
+      - my-image.tar
+
+container-scan:
+  stage: security-container
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  dependencies:
+    - build-image
+  script:
+    - trivy image --input my-image.tar --severity CRITICAL --exit-code 1
