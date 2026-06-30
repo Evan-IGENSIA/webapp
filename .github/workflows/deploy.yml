@@ -1,0 +1,59 @@
+name: K8s Container Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Nom de l'image en minuscules
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/webapp" >> $GITHUB_ENV
+      - name: Connexion a GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build et push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+
+  deploy-k8s:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Nom de l'image en minuscules
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/webapp" >> $GITHUB_ENV
+      - name: Creer un cluster Kubernetes ephemere (kind)
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: tp3
+      - name: Creer le secret pour tirer l'image privee depuis GHCR
+        run: |
+          kubectl create secret docker-registry ghcr-secret \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password=${{ secrets.GITHUB_TOKEN }}
+      - name: Injecter l'image puis deployer les manifests
+        run: |
+          sed -i "s|IMAGE_PLACEHOLDER|${{ env.IMAGE }}:${GITHUB_SHA}|g" k8s/deployment.yaml
+          kubectl apply -f k8s/
+          kubectl rollout status deployment/webapp --timeout=120s
+      - name: Verifier le deploiement (smoke test)
+        run: |
+          kubectl get pods -o wide
+          kubectl get svc webapp
+          kubectl port-forward svc/webapp 8080:80 &
+          sleep 5
+          curl -s http://localhost:8080/ | grep -i "hello"
