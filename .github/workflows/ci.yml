@@ -1,49 +1,93 @@
-name: DevSecOps Cloud Pipeline
+name: DevSecOps Pipeline (Cloud)
 
 on:
   push:
-    branches:
-      - main
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+  security-events: write
 
 jobs:
-  test-and-sast:
+  # 1. Tests unitaires + couverture
+  unit-test:
     runs-on: ubuntu-latest
     steps:
-      - name: Récupération du code (Checkout)
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+      - run: npm test
+      - name: Sauvegarder la couverture
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+
+  # 2. SonarQube Cloud (SAST & qualite du code)
+  sonar-check:
+    needs: unit-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Configuration de Node.js
-        uses: actions/setup-node@v4
+      - name: Recuperer la couverture
+        uses: actions/download-artifact@v4
         with:
-          node-version: '16'
-
-      - name: Installation et exécution des tests unitaires
-        run: |
-          npm install
-          npm test
-
-      - name: Analyse SAST via SonarCloud
+          name: coverage
+          path: coverage/
+      - name: Analyse SonarQube Cloud
         uses: SonarSource/sonarqube-scan-action@v5.0.0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
-  security-container:
-    needs: test-and-sast
+  # 3. Trivy - scan des dependances (SCA)
+  dependency-scan:
     runs-on: ubuntu-latest
     steps:
-      - name: Récupération du code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - name: Scan du systeme de fichiers
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
 
-      - name: Build de l'image Docker locale
+  # 4. Build de l'image Docker
+  build-image:
+    needs: [ sonar-check, dependency-scan ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build de l'image
         run: docker build -t my-app:${{ github.sha }} .
+      - name: Exporter l'image
+        run: docker save my-app:${{ github.sha }} -o my-image.tar
+      - name: Sauvegarder l'image
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: my-image.tar
 
-      - name: Scan de vulnérabilités Trivy (SCA/Container)
-        uses: aquasecurity/trivy-action@master
+  # 5. Trivy - scan de l'image (conteneur)
+  container-scan:
+    needs: build-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: .
+      - name: Charger l'image
+        run: docker load -i my-image.tar
+      - name: Scan de l'image
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           image-ref: 'my-app:${{ github.sha }}'
-          format: 'table'
+          severity: 'CRITICAL'
           exit-code: '1'
-          severity: 'CRITICAL,HIGH'
